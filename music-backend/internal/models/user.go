@@ -3,10 +3,11 @@ package models
 import "time"
 
 const (
-	RegistrationPending = "pending_confirmation"
-	RegistrationActive  = "active"
-	PasswordMinLength   = 8
-	PasswordMaxAge      = time.Hour
+	RegistrationPending     = "pending_confirmation"
+	RegistrationActive      = "active"
+	PasswordMinLength       = 8
+	PasswordMaxAge          = time.Hour
+	PasswordMinAgeForChange = 24 * time.Hour
 )
 
 // User minimalni model za registraciju (zahtev 1.1).
