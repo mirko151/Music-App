@@ -25,6 +25,7 @@ type MongoUserStore struct {
 	otpMap          map[string]otpEntry
 	resetMap        map[string]resetEntry
 	sessions        map[string]string
+	magicMap        map[string]resetEntry
 }
 
 func NewMongoUserStore(ctx context.Context, uri, dbName, collection string) (*MongoUserStore, error) {
@@ -48,6 +49,7 @@ func NewMongoUserStore(ctx context.Context, uri, dbName, collection string) (*Mo
 		verificationMap: make(map[string]string),
 		otpMap:          make(map[string]otpEntry),
 		resetMap:        make(map[string]resetEntry),
+		magicMap:        make(map[string]resetEntry),
 		sessions:        make(map[string]string),
 	}, nil
 }
@@ -59,10 +61,13 @@ type mongoUser struct {
 	LastName           string             `bson:"lastName"`
 	Email              string             `bson:"email"`
 	PasswordHash       string             `bson:"passwordHash"`
+	Role               string             `bson:"role"`
 	Verified           bool               `bson:"verified"`
 	PasswordChangedAt  time.Time          `bson:"passwordChangedAt"`
 	PasswordExpiresAt  time.Time          `bson:"passwordExpiresAt"`
 	RegistrationStatus string             `bson:"registrationStatus"`
+	CreatedAt          time.Time          `bson:"createdAt"`
+	UpdatedAt          time.Time          `bson:"updatedAt"`
 }
 
 func (s *MongoUserStore) Register(u models.User) (string, error) {
@@ -93,10 +98,13 @@ func (s *MongoUserStore) Register(u models.User) (string, error) {
 		LastName:           u.LastName,
 		Email:              u.Email,
 		PasswordHash:       u.PasswordHash,
+		Role:               u.Role,
 		Verified:           false,
 		RegistrationStatus: models.RegistrationPending,
 		PasswordChangedAt:  time.Now(),
 		PasswordExpiresAt:  time.Now().Add(models.PasswordMaxAge),
+		CreatedAt:          time.Now(),
+		UpdatedAt:          time.Now(),
 	}
 	if _, err := s.col.InsertOne(ctx, doc); err != nil {
 		return "", err
@@ -257,6 +265,158 @@ func (s *MongoUserStore) ResetPassword(token, newPassword string) error {
 	}
 	if res.ModifiedCount == 0 {
 		return errors.New("nije ažuriran korisnik")
+	}
+	return nil
+}
+
+func (s *MongoUserStore) RequestMagicLink(email string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var u mongoUser
+	if err := s.col.FindOne(ctx, bson.M{"email": email}).Decode(&u); err != nil {
+		return "", ErrUserNotFound
+	}
+	token, err := security.GenerateToken()
+	if err != nil {
+		return "", err
+	}
+	s.magicMap[token] = resetEntry{
+		Username:  u.Username,
+		ExpiresAt: time.Now().Add(15 * time.Minute),
+	}
+	return token, nil
+}
+
+func (s *MongoUserStore) ConsumeMagicLink(token string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	entry, ok := s.magicMap[token]
+	if !ok || time.Now().After(entry.ExpiresAt) {
+		return "", ErrMagicInvalid
+	}
+	delete(s.magicMap, token)
+
+	session, err := security.GenerateToken()
+	if err != nil {
+		return "", err
+	}
+	s.sessions[session] = entry.Username
+	return session, nil
+}
+
+// VerifyOTPAndGetUser verifikuje OTP i vraća User objekat
+func (s *MongoUserStore) VerifyOTPAndGetUser(code string) (*models.User, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	entry, ok := s.otpMap[code]
+	if !ok || time.Now().After(entry.ExpiresAt) {
+		return nil, ErrOTPInvalid
+	}
+	delete(s.otpMap, code)
+
+	var mu mongoUser
+	if err := s.col.FindOne(ctx, bson.M{"username": entry.Username}).Decode(&mu); err != nil {
+		return nil, ErrUserNotFound
+	}
+
+	return &models.User{
+		ID:                mu.ID.Hex(),
+		Username:          mu.Username,
+		FirstName:         mu.FirstName,
+		LastName:          mu.LastName,
+		Email:             mu.Email,
+		Role:              "RK", // Default role from DB
+		PasswordHash:      mu.PasswordHash,
+		Verified:          mu.Verified,
+		PasswordChangedAt: mu.PasswordChangedAt,
+		PasswordExpiresAt: mu.PasswordExpiresAt,
+	}, nil
+}
+
+// ConsumeMagicLinkAndGetUser potvrđuje magic link i vraća User objekat
+func (s *MongoUserStore) ConsumeMagicLinkAndGetUser(token string) (*models.User, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	entry, ok := s.magicMap[token]
+	if !ok || time.Now().After(entry.ExpiresAt) {
+		return nil, ErrMagicInvalid
+	}
+	delete(s.magicMap, token)
+
+	var mu mongoUser
+	if err := s.col.FindOne(ctx, bson.M{"username": entry.Username}).Decode(&mu); err != nil {
+		return nil, ErrUserNotFound
+	}
+
+	return &models.User{
+		ID:                mu.ID.Hex(),
+		Username:          mu.Username,
+		FirstName:         mu.FirstName,
+		LastName:          mu.LastName,
+		Email:             mu.Email,
+		Role:              "RK", // Default role from DB
+		PasswordHash:      mu.PasswordHash,
+		Verified:          mu.Verified,
+		PasswordChangedAt: mu.PasswordChangedAt,
+		PasswordExpiresAt: mu.PasswordExpiresAt,
+	}, nil
+}
+
+// UpdateLastLogin ažurira poslednju prijavu
+func (s *MongoUserStore) UpdateLastLogin(userID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	objID, err := primitive.ObjectIDFromHex(userID)
+	if err != nil {
+		return err
+	}
+
+	res, err := s.col.UpdateOne(ctx, bson.M{"_id": objID}, bson.M{"$set": bson.M{"updatedAt": time.Now()}})
+	if err != nil {
+		return err
+	}
+	if res.ModifiedCount == 0 {
+		return ErrUserNotFound
+	}
+	return nil
+}
+
+// UpdateUserRole menja ulogu korisnika (2.17)
+func (s *MongoUserStore) UpdateUserRole(userID, role string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	objID, err := primitive.ObjectIDFromHex(userID)
+	if err != nil {
+		return err
+	}
+
+	res, err := s.col.UpdateOne(ctx, bson.M{"_id": objID}, bson.M{"$set": bson.M{"role": role, "updatedAt": time.Now()}})
+	if err != nil {
+		return err
+	}
+	if res.ModifiedCount == 0 {
+		return ErrUserNotFound
 	}
 	return nil
 }

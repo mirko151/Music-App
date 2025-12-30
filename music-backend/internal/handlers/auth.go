@@ -7,7 +7,9 @@ import (
 	"github.com/gin-gonic/gin"
 	"golang.org/x/crypto/bcrypt"
 
+	"music-backend/internal/middleware"
 	"music-backend/internal/models"
+	"music-backend/internal/security"
 	"music-backend/internal/store"
 	"music-backend/internal/validation"
 )
@@ -55,12 +57,24 @@ type ResetConfirmRequest struct {
 	ConfirmPassword string `json:"confirmPassword" binding:"required"`
 }
 
-type AuthHandler struct {
-	users store.UserStore
+type MagicLinkRequest struct {
+	Email string `json:"email" binding:"required,email"`
 }
 
-func NewAuthHandler(users store.UserStore) *AuthHandler {
-	return &AuthHandler{users: users}
+type MagicLinkConfirm struct {
+	Token string `json:"token" binding:"required"`
+}
+
+type AuthHandler struct {
+	users        store.UserStore
+	tokenManager *security.TokenManager
+}
+
+func NewAuthHandler(users store.UserStore, tokenManager *security.TokenManager) *AuthHandler {
+	return &AuthHandler{
+		users:        users,
+		tokenManager: tokenManager,
+	}
 }
 
 func (h *AuthHandler) RegisterRoutes(r *gin.Engine) {
@@ -68,10 +82,16 @@ func (h *AuthHandler) RegisterRoutes(r *gin.Engine) {
 	r.POST("/register/confirm", h.Confirm)
 	r.POST("/login", h.Login)
 	r.POST("/login/verify", h.VerifyOTP)
-	r.POST("/logout", h.Logout)
-	r.POST("/password/change", h.ChangePassword)
+	r.POST("/logout", middleware.AuthMiddleware(h.tokenManager), h.Logout)
+	r.POST("/password/change", middleware.AuthMiddleware(h.tokenManager), h.ChangePassword)
 	r.POST("/password/reset/request", h.RequestReset)
 	r.POST("/password/reset/confirm", h.ResetPassword)
+	r.POST("/magic/request", h.RequestMagicLink)
+	r.POST("/magic/confirm", h.ConfirmMagicLink)
+	
+	// Admin rutas
+	adminRoutes := r.Group("/admin", middleware.AuthMiddleware(h.tokenManager), middleware.RequireRole(security.RoleAdmin))
+	adminRoutes.POST("/users/:id/role", h.UpdateUserRole)
 }
 
 // Register implementira 1.1: unos podataka, jaka lozinka, provera jedinstvenosti, kreira verifikacioni token.
@@ -103,12 +123,17 @@ func (h *AuthHandler) Register(c *gin.Context) {
 	}
 
 	u := models.User{
+		ID:                string(time.Now().Unix()),
 		Username:          username,
 		FirstName:         first,
 		LastName:          last,
 		Email:             email,
 		PasswordHash:      string(hash),
+		Role:              security.RoleRegularUser,
 		PasswordChangedAt: time.Now(),
+		PasswordExpiresAt: time.Now().Add(models.PasswordMaxAge),
+		CreatedAt:         time.Now(),
+		UpdatedAt:         time.Now(),
 	}
 
 	token, err := h.users.Register(u)
@@ -175,42 +200,67 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	})
 }
 
-// VerifyOTP: korak 2, potvrđuje OTP i vraća session token.
+// VerifyOTP: korak 2, potvrđuje OTP i vraća JWT token
 func (h *AuthHandler) VerifyOTP(c *gin.Context) {
 	var req OTPVerifyRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "neispravan unos", "details": err.Error()})
 		return
 	}
-	session, err := h.users.VerifyOTP(req.OTP)
+	user, err := h.users.VerifyOTPAndGetUser(req.OTP)
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
 		return
 	}
+
+	// Generisanje JWT tokena
+	token, err := h.tokenManager.GenerateToken(user.ID, user.Username, user.Email, user.Role)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "greška pri generisanju tokena"})
+		return
+	}
+
+	// Ažuriranje LastLoginAt
+	h.users.UpdateLastLogin(user.ID)
+
 	c.JSON(http.StatusOK, gin.H{
-		"message": "prijava uspešna",
-		"session": session,
+		"message":   "prijava uspešna",
+		"token":     token,
+		"user_id":   user.ID,
+		"email":     user.Email,
+		"role":      user.Role,
+		"username":  user.Username,
+		"expiresAt": time.Now().Add(time.Duration(24) * time.Hour).Unix(),
 	})
 }
 
-// Logout: uklanja session token (radi demo-a prihvatamo kroz telo).
+// Logout: odjava (invalidira token na klijentskoj strani)
 func (h *AuthHandler) Logout(c *gin.Context) {
-	var req LogoutRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "neispravan unos", "details": err.Error()})
+	userID := middleware.ExtractUserID(c)
+	if userID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "user not found"})
 		return
 	}
-	h.users.Logout(req.Session)
-	c.JSON(http.StatusOK, gin.H{"message": "odjava uspešna"})
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "odjava uspešna",
+	})
 }
 
-// ChangePassword: zahteva staru lozinku, nova mora biti validna i stara lozinka mora biti starija od 24h.
+// ChangePassword: promenjena lozinka sa autentifikacijom
 func (h *AuthHandler) ChangePassword(c *gin.Context) {
 	var req ChangePasswordRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "neispravan unos", "details": err.Error()})
 		return
 	}
+
+	userID := middleware.ExtractUserID(c)
+	if userID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user not authenticated"})
+		return
+	}
+
 	if req.NewPassword != req.ConfirmPassword {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "lozinke se ne poklapaju"})
 		return
@@ -283,4 +333,94 @@ func (h *AuthHandler) ResetPassword(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"message": "lozinka resetovana"})
+}
+
+// RequestMagicLink: generiše magic link (demo: vraća ga u odgovoru, inače bi se slao emailom).
+func (h *AuthHandler) RequestMagicLink(c *gin.Context) {
+	var req MagicLinkRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "neispravan unos", "details": err.Error()})
+		return
+	}
+	token, err := h.users.RequestMagicLink(req.Email)
+	if err != nil {
+		status := http.StatusNotFound
+		if err != store.ErrUserNotFound {
+			status = http.StatusInternalServerError
+		}
+		c.JSON(status, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"message":    "magic link generisan (demo: token vraćen ovde, inače bi bio poslat emailom)",
+		"magicToken": token,
+	})
+}
+
+// ConfirmMagicLink: potvrđuje magic link i vraća JWT token
+func (h *AuthHandler) ConfirmMagicLink(c *gin.Context) {
+	var req MagicLinkConfirm
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "neispravan unos", "details": err.Error()})
+		return
+	}
+	user, err := h.users.ConsumeMagicLinkAndGetUser(req.Token)
+	if err != nil {
+		status := http.StatusUnauthorized
+		if err == store.ErrMagicInvalid {
+			status = http.StatusUnauthorized
+		}
+		c.JSON(status, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Generisanje JWT tokena
+	token, err := h.tokenManager.GenerateToken(user.ID, user.Username, user.Email, user.Role)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "greška pri generisanju tokena"})
+		return
+	}
+
+	// Ažuriranje LastLoginAt
+	h.users.UpdateLastLogin(user.ID)
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":   "magic link potvrđen, prijava uspešna",
+		"token":     token,
+		"user_id":   user.ID,
+		"email":     user.Email,
+		"role":      user.Role,
+		"username":  user.Username,
+		"expiresAt": time.Now().Add(time.Duration(24) * time.Hour).Unix(),
+	})
+}
+
+// UpdateUserRole: Admin akcija za promenu uloge korisnika (2.17)
+func (h *AuthHandler) UpdateUserRole(c *gin.Context) {
+	userID := c.Param("id")
+	
+	var req struct {
+		Role string `json:"role" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "neispravan unos", "details": err.Error()})
+		return
+	}
+
+	// Validacija uloge
+	if req.Role != security.RoleAdmin && req.Role != security.RoleRegularUser {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "nevalidna uloga"})
+		return
+	}
+
+	if err := h.users.UpdateUserRole(userID, req.Role); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "uloga korisnika ažurirana",
+		"user_id": userID,
+		"role":    req.Role,
+	})
 }

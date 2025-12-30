@@ -5,17 +5,26 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 
 	"github.com/gin-gonic/gin"
 
 	"music-backend/internal/handlers"
 	"music-backend/internal/middleware"
+	"music-backend/internal/security"
 	"music-backend/internal/store"
 )
 
 func main() {
 	r := gin.Default()
 	r.Use(middleware.CORS())
+
+	// Konfiguracija iz environment varijabli
+	jwtSecret := envOr("JWT_SECRET", "your-secret-key-change-in-production")
+	jwtExpiryHours := envOrInt("JWT_EXPIRY_HOURS", 24)
+
+	// Kreiranje token manager-a
+	tokenManager := security.NewTokenManager(jwtSecret, jwtExpiryHours)
 
 	var userStore store.UserStore = store.NewMemoryUserStore()
 	if uri := os.Getenv("MONGO_URI"); uri != "" {
@@ -26,7 +35,7 @@ func main() {
 			log.Printf("Mongo konekcija nije uspela, koristi se memorijski store: %v\n", err)
 		}
 	}
-	authHandler := handlers.NewAuthHandler(userStore)
+	authHandler := handlers.NewAuthHandler(userStore, tokenManager)
 
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
@@ -45,6 +54,15 @@ func main() {
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return def
+}
+
+func envOrInt(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if val, err := strconv.Atoi(v); err == nil {
+			return val
+		}
 	}
 	return def
 }

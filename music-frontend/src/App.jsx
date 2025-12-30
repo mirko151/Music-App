@@ -196,36 +196,11 @@ function RegistrationView({ goToLogin }) {
   )
 }
 
-function LoginView({ goToRegister }) {
-  // Login / OTP
+function LoginView({ goToRegister, goToRecover }) {
   const [loginForm, setLoginForm] = useState({ username: '', password: '' })
   const [otp, setOtp] = useState('')
   const [session, setSession] = useState('')
   const [loginStatus, setLoginStatus] = useState('')
-
-  // Promena lozinke
-  const [changeForm, setChangeForm] = useState({
-    username: '',
-    currentPassword: '',
-    newPassword: '',
-    confirmPassword: '',
-  })
-  const [changeStatus, setChangeStatus] = useState('')
-
-  // Reset lozinke
-  const [resetEmail, setResetEmail] = useState('')
-  const [resetForm, setResetForm] = useState({ token: '', newPassword: '', confirmPassword: '' })
-  const [resetTokenDisplay, setResetTokenDisplay] = useState('')
-  const [resetStatus, setResetStatus] = useState('')
-
-  const passwordStrongChange = useMemo(
-    () => passwordRules.every((r) => r.test(changeForm.newPassword)),
-    [changeForm.newPassword],
-  )
-  const passwordStrongReset = useMemo(
-    () => passwordRules.every((r) => r.test(resetForm.newPassword)),
-    [resetForm.newPassword],
-  )
 
   const login = async (e) => {
     e.preventDefault()
@@ -286,6 +261,97 @@ function LoginView({ goToRegister }) {
       setLoginStatus(err.message)
     }
   }
+
+  return (
+    <div className="page">
+      <header>
+        <p className="eyebrow">Prijava</p>
+        <h1>Muzika · Pristup nalogu</h1>
+        <p className="lede">Prijava sa OTP. Treba ti nalog ili reset? Otvori odgovarajuću stranicu.</p>
+      </header>
+
+      <main className="grid">
+        <section className="card">
+          <h2>Prijava (OTP)</h2>
+          <form className="form" onSubmit={login}>
+            <div className="field">
+              <label>
+                Korisničko ime
+                <input
+                  name="username"
+                  value={loginForm.username}
+                  onChange={(e) => setLoginForm((p) => ({ ...p, username: e.target.value }))}
+                />
+              </label>
+            </div>
+            <div className="field">
+              <label>
+                Lozinka
+                <input
+                  name="password"
+                  type="password"
+                  value={loginForm.password}
+                  onChange={(e) => setLoginForm((p) => ({ ...p, password: e.target.value }))}
+                />
+              </label>
+            </div>
+            <div className="action-row">
+              <button type="submit">Dobij OTP</button>
+              <button type="button" className="link-btn" onClick={goToRegister}>
+                Registracija
+              </button>
+              <button type="button" className="link-btn" onClick={goToRecover}>
+                Zaboravljena lozinka / Magic link
+              </button>
+            </div>
+          </form>
+          <div className="field" style={{ marginTop: 12 }}>
+            <label>
+              OTP kod
+              <input value={otp} onChange={(e) => setOtp(e.target.value)} placeholder="unesi 6-cifreni kod" />
+            </label>
+            <div className="token-box">{session ? `Session: ${session}` : 'Nema sesije još'}</div>
+          </div>
+          <div className="action-row">
+            <button type="button" onClick={verifyOtp}>
+              Potvrdi OTP
+            </button>
+            <button type="button" onClick={logout}>
+              Odjava
+            </button>
+          </div>
+          {loginStatus && <p className="info">{loginStatus}</p>}
+        </section>
+      </main>
+    </div>
+  )
+}
+
+function RecoveryView({ goToLogin }) {
+  const [changeForm, setChangeForm] = useState({
+    username: '',
+    currentPassword: '',
+    newPassword: '',
+    confirmPassword: '',
+  })
+  const [changeStatus, setChangeStatus] = useState('')
+  const [resetEmail, setResetEmail] = useState('')
+  const [resetForm, setResetForm] = useState({ token: '', newPassword: '', confirmPassword: '' })
+  const [resetTokenDisplay, setResetTokenDisplay] = useState('')
+  const [resetStatus, setResetStatus] = useState('')
+  const [magicEmail, setMagicEmail] = useState('')
+  const [magicToken, setMagicToken] = useState('')
+  const [magicStatus, setMagicStatus] = useState('')
+  const [session, setSession] = useState('')
+
+  const passwordStrongChange = useMemo(
+    () => passwordRules.every((r) => r.test(changeForm.newPassword)),
+    [changeForm.newPassword],
+  )
+  const passwordStrongReset = useMemo(
+    () => passwordRules.every((r) => r.test(resetForm.newPassword)),
+    [resetForm.newPassword],
+  )
 
   const changePassword = async (e) => {
     e.preventDefault()
@@ -366,64 +432,52 @@ function LoginView({ goToRegister }) {
     }
   }
 
+  const requestMagic = async (e) => {
+    e.preventDefault()
+    setMagicStatus('')
+    setMagicToken('')
+    try {
+      const res = await fetch(`${API_BASE}/magic/request`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: magicEmail.trim() }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || 'Neuspešan zahtev za magic link')
+      setMagicToken(data.magicToken || '')
+      setMagicStatus(data.message || 'Magic link generisan (demo)')
+    } catch (err) {
+      setMagicStatus(err.message)
+    }
+  }
+
+  const confirmMagic = async (e) => {
+    e.preventDefault()
+    setMagicStatus('')
+    try {
+      const res = await fetch(`${API_BASE}/magic/confirm`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: magicToken }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || 'Magic link nevažeći')
+      setSession(data.session || '')
+      setMagicStatus(data.message || 'Prijava preko magic linka uspešna')
+    } catch (err) {
+      setMagicStatus(err.message)
+    }
+  }
+
   return (
     <div className="page">
       <header>
-        <p className="eyebrow">Prijava</p>
-        <h1>Muzika · Pristup nalogu</h1>
-        <p className="lede">Prijava sa OTP, promena i reset lozinke. Nemaš nalog? Registruj se.</p>
+        <p className="eyebrow">Bezbednost naloga</p>
+        <h1>Promena / Reset / Magic link</h1>
+        <p className="lede">Menjaj lozinku, resetuj ili koristi magic link. Vrati se na prijavu kad završiš.</p>
       </header>
 
       <main className="grid">
-        <section className="card">
-          <h2>Prijava (OTP)</h2>
-          <form className="form" onSubmit={login}>
-            <div className="field">
-              <label>
-                Korisničko ime
-                <input
-                  name="username"
-                  value={loginForm.username}
-                  onChange={(e) => setLoginForm((p) => ({ ...p, username: e.target.value }))}
-                />
-              </label>
-            </div>
-            <div className="field">
-              <label>
-                Lozinka
-                <input
-                  name="password"
-                  type="password"
-                  value={loginForm.password}
-                  onChange={(e) => setLoginForm((p) => ({ ...p, password: e.target.value }))}
-                />
-              </label>
-            </div>
-            <div className="action-row">
-              <button type="submit">Dobij OTP</button>
-              <button type="button" className="link-btn" onClick={goToRegister}>
-                Nemaš nalog? Registruj se
-              </button>
-            </div>
-          </form>
-          <div className="field" style={{ marginTop: 12 }}>
-            <label>
-              OTP kod
-              <input value={otp} onChange={(e) => setOtp(e.target.value)} placeholder="unesi 6-cifreni kod" />
-            </label>
-            <div className="token-box">{session ? `Session: ${session}` : 'Nema sesije još'}</div>
-          </div>
-          <div className="action-row">
-            <button type="button" onClick={verifyOtp}>
-              Potvrdi OTP
-            </button>
-            <button type="button" onClick={logout}>
-              Odjava
-            </button>
-          </div>
-          {loginStatus && <p className="info">{loginStatus}</p>}
-        </section>
-
         <section className="card">
           <h2>Promena lozinke</h2>
           <form className="form" onSubmit={changePassword}>
@@ -476,7 +530,12 @@ function LoginView({ goToRegister }) {
                 )
               })}
             </div>
-            <button type="submit">Promeni lozinku</button>
+            <div className="action-row">
+              <button type="submit">Promeni lozinku</button>
+              <button type="button" className="link-btn" onClick={goToLogin}>
+                Nazad na prijavu
+              </button>
+            </div>
             {changeStatus && <p className="info">{changeStatus}</p>}
           </form>
         </section>
@@ -536,17 +595,52 @@ function LoginView({ goToRegister }) {
             {resetStatus && <p className="info">{resetStatus}</p>}
           </form>
         </section>
+
+        <section className="card">
+          <h2>Povraćaj naloga (Magic link)</h2>
+          <form className="form" onSubmit={requestMagic}>
+            <div className="field">
+              <label>
+                Email
+                <input value={magicEmail} onChange={(e) => setMagicEmail(e.target.value)} />
+              </label>
+            </div>
+            <button type="submit">Pošalji magic link</button>
+          </form>
+          <div className="token-box">{magicToken || 'Nema magic tokena još'}</div>
+          <form className="form" onSubmit={confirmMagic}>
+            <div className="field">
+              <label>
+                Magic token
+                <input value={magicToken} onChange={(e) => setMagicToken(e.target.value)} placeholder="unesi magic token" />
+              </label>
+            </div>
+            <div className="action-row">
+              <button type="submit">Potvrdi magic link</button>
+              {session && <span className="info">Session: {session}</span>}
+            </div>
+          </form>
+          {magicStatus && <p className="info">{magicStatus}</p>}
+        </section>
       </main>
     </div>
   )
 }
 
 function App() {
-  const [view, setView] = useState(() => (window.location.hash === '#register' ? 'register' : 'login'))
+  const [view, setView] = useState(() => {
+    const hash = window.location.hash
+    if (hash === '#register') return 'register'
+    if (hash === '#recover') return 'recover'
+    return 'login'
+  })
 
   useEffect(() => {
     const onHash = () => {
-      setView(window.location.hash === '#register' ? 'register' : 'login')
+      const hash = window.location.hash
+      if (hash === '#register') setView('register')
+      else if (hash === '#recover') setView('recover')
+      else setView('login')
     }
     window.addEventListener('hashchange', onHash)
     return () => window.removeEventListener('hashchange', onHash)
@@ -560,8 +654,14 @@ function App() {
     window.location.hash = '#login'
     setView('login')
   }
+  const goToRecover = () => {
+    window.location.hash = '#recover'
+    setView('recover')
+  }
 
-  return view === 'register' ? <RegistrationView goToLogin={goToLogin} /> : <LoginView goToRegister={goToRegister} />
+  if (view === 'register') return <RegistrationView goToLogin={goToLogin} />
+  if (view === 'recover') return <RecoveryView goToLogin={goToLogin} />
+  return <LoginView goToRegister={goToRegister} goToRecover={goToRecover} />
 }
 
 export default App

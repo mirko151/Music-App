@@ -20,6 +20,7 @@ var (
 	ErrPasswordTooNew  = errors.New("lozinka mora biti stara bar 24h pre izmene")
 	ErrOTPInvalid      = errors.New("otp je nevažeći ili istekao")
 	ErrResetInvalid    = errors.New("reset token je nevažeći ili istekao")
+	ErrMagicInvalid    = errors.New("magic link je nevažeći ili istekao")
 )
 
 type UserStore interface {
@@ -27,10 +28,16 @@ type UserStore interface {
 	Confirm(token string) error
 	Authenticate(username, password string) (string, error)
 	VerifyOTP(code string) (string, error)
+	VerifyOTPAndGetUser(code string) (*models.User, error)
 	Logout(session string)
 	ChangePassword(username, currentPassword, newPassword string) error
 	RequestPasswordReset(email string) (string, error)
 	ResetPassword(token, newPassword string) error
+	RequestMagicLink(email string) (string, error)
+	ConsumeMagicLink(token string) (string, error)
+	ConsumeMagicLinkAndGetUser(token string) (*models.User, error)
+	UpdateLastLogin(userID string) error
+	UpdateUserRole(userID, role string) error
 }
 
 type MemoryUserStore struct {
@@ -40,6 +47,7 @@ type MemoryUserStore struct {
 	otpMap          map[string]otpEntry
 	resetMap        map[string]resetEntry
 	sessions        map[string]string // sessionToken -> username
+	magicMap        map[string]resetEntry
 }
 
 type otpEntry struct {
@@ -58,6 +66,7 @@ func NewMemoryUserStore() *MemoryUserStore {
 		verificationMap: make(map[string]string),
 		otpMap:          make(map[string]otpEntry),
 		resetMap:        make(map[string]resetEntry),
+		magicMap:        make(map[string]resetEntry),
 		sessions:        make(map[string]string),
 	}
 }
@@ -231,4 +240,114 @@ func (s *MemoryUserStore) ResetPassword(token, newPassword string) error {
 	u.PasswordExpiresAt = time.Now().Add(models.PasswordMaxAge)
 	s.users[entry.Username] = u
 	return nil
+}
+
+func (s *MemoryUserStore) RequestMagicLink(email string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var username string
+	for _, u := range s.users {
+		if u.Email == email {
+			username = u.Username
+			break
+		}
+	}
+	if username == "" {
+		return "", ErrUserNotFound
+	}
+	token, err := security.GenerateToken()
+	if err != nil {
+		return "", err
+	}
+	s.magicMap[token] = resetEntry{
+		Username:  username,
+		ExpiresAt: time.Now().Add(15 * time.Minute),
+	}
+	return token, nil
+}
+
+func (s *MemoryUserStore) ConsumeMagicLink(token string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	entry, ok := s.magicMap[token]
+	if !ok || time.Now().After(entry.ExpiresAt) {
+		return "", ErrMagicInvalid
+	}
+	delete(s.magicMap, token)
+
+	session, err := security.GenerateToken()
+	if err != nil {
+		return "", err
+	}
+	s.sessions[session] = entry.Username
+	return session, nil
+}
+
+// VerifyOTPAndGetUser verifikuje OTP i vraća User objekat
+func (s *MemoryUserStore) VerifyOTPAndGetUser(code string) (*models.User, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	entry, ok := s.otpMap[code]
+	if !ok || time.Now().After(entry.ExpiresAt) {
+		return nil, ErrOTPInvalid
+	}
+	delete(s.otpMap, code)
+
+	u, ok := s.users[entry.Username]
+	if !ok {
+		return nil, ErrUserNotFound
+	}
+	return &u, nil
+}
+
+// ConsumeMagicLinkAndGetUser potvrđuje magic link i vraća User objekat
+func (s *MemoryUserStore) ConsumeMagicLinkAndGetUser(token string) (*models.User, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	entry, ok := s.magicMap[token]
+	if !ok || time.Now().After(entry.ExpiresAt) {
+		return nil, ErrMagicInvalid
+	}
+	delete(s.magicMap, token)
+
+	u, ok := s.users[entry.Username]
+	if !ok {
+		return nil, ErrUserNotFound
+	}
+	return &u, nil
+}
+
+// UpdateLastLogin ažurira LastLoginAt polje
+func (s *MemoryUserStore) UpdateLastLogin(userID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for k, u := range s.users {
+		if u.ID == userID {
+			u.UpdatedAt = time.Now()
+			s.users[k] = u
+			return nil
+		}
+	}
+	return ErrUserNotFound
+}
+
+// UpdateUserRole menja ulogu korisnika (2.17)
+func (s *MemoryUserStore) UpdateUserRole(userID, role string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for k, u := range s.users {
+		if u.ID == userID {
+			u.Role = role
+			u.UpdatedAt = time.Now()
+			s.users[k] = u
+			return nil
+		}
+	}
+	return ErrUserNotFound
 }
