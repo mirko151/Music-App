@@ -2,6 +2,8 @@ package handlers
 
 import (
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -78,20 +80,26 @@ func NewAuthHandler(users store.UserStore, tokenManager *security.TokenManager) 
 }
 
 func (h *AuthHandler) RegisterRoutes(r *gin.Engine) {
-	r.POST("/register", h.Register)
-	r.POST("/register/confirm", h.Confirm)
-	r.POST("/login", h.Login)
-	r.POST("/login/verify", h.VerifyOTP)
-	r.POST("/logout", middleware.AuthMiddleware(h.tokenManager), h.Logout)
-	r.POST("/password/change", middleware.AuthMiddleware(h.tokenManager), h.ChangePassword)
-	r.POST("/password/reset/request", h.RequestReset)
-	r.POST("/password/reset/confirm", h.ResetPassword)
-	r.POST("/magic/request", h.RequestMagicLink)
-	r.POST("/magic/confirm", h.ConfirmMagicLink)
+	// 2.18: validacija ulaza + boundary checking (JSON only + limit)
+	json := r.Group("/", middleware.RequireJSONGin(), middleware.LimitBodyGin(1<<20))
+	json.POST("/register", h.Register)
+	json.POST("/register/confirm", h.Confirm)
+	json.POST("/login", h.Login)
+	json.POST("/login/verify", h.VerifyOTP)
+	json.POST("/password/reset/request", h.RequestReset)
+	json.POST("/password/reset/confirm", h.ResetPassword)
+	json.POST("/magic/request", h.RequestMagicLink)
+	json.POST("/magic/confirm", h.ConfirmMagicLink)
+
+	// JWT-zaštićene JSON rute
+	protected := r.Group("/", middleware.RequireJSONGin(), middleware.LimitBodyGin(1<<20), middleware.AuthMiddleware(h.tokenManager))
+	protected.POST("/logout", h.Logout)
+	protected.POST("/password/change", h.ChangePassword)
 	
 	// Admin rutas
 	adminRoutes := r.Group("/admin", middleware.AuthMiddleware(h.tokenManager), middleware.RequireRole(security.RoleAdmin))
 	adminRoutes.POST("/users/:id/role", h.UpdateUserRole)
+	adminRoutes.POST("/file/verify", h.VerifyFileUpload)
 }
 
 // Register implementira 1.1: unos podataka, jaka lozinka, provera jedinstvenosti, kreira verifikacioni token.
@@ -103,6 +111,23 @@ func (h *AuthHandler) Register(c *gin.Context) {
 	}
 
 	first, last, username, email := validation.NormalizeInputs(req.FirstName, req.LastName, req.Username, req.Email)
+	first = validation.NormalizeHumanText(first)
+	last = validation.NormalizeHumanText(last)
+	username = strings.TrimSpace(strings.ToLower(username))
+	email = strings.TrimSpace(strings.ToLower(email))
+
+	if err := validation.ValidateHumanName(first, "ime"); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := validation.ValidateHumanName(last, "prezime"); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := validation.ValidateEmail(email); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 	if err := validation.ValidateUsername(username); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -123,7 +148,7 @@ func (h *AuthHandler) Register(c *gin.Context) {
 	}
 
 	u := models.User{
-		ID:                string(time.Now().Unix()),
+		ID:                strconv.FormatInt(time.Now().Unix(), 10),
 		Username:          username,
 		FirstName:         first,
 		LastName:          last,
@@ -158,6 +183,10 @@ func (h *AuthHandler) Confirm(c *gin.Context) {
 	var req ConfirmRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "neispravan unos", "details": err.Error()})
+		return
+	}
+	if err := validation.ValidateHexToken(req.Token); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
@@ -205,6 +234,10 @@ func (h *AuthHandler) VerifyOTP(c *gin.Context) {
 	var req OTPVerifyRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "neispravan unos", "details": err.Error()})
+		return
+	}
+	if err := validation.ValidateOTP(req.OTP); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 	user, err := h.users.VerifyOTPAndGetUser(req.OTP)
@@ -289,6 +322,10 @@ func (h *AuthHandler) ChangePassword(c *gin.Context) {
 // RequestReset: generiše reset token (demo: vraća se u odgovoru; inače bi bio poslat emailom).
 func (h *AuthHandler) RequestReset(c *gin.Context) {
 	var req ResetRequest
+		if err := validation.ValidateEmail(req.Email); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "neispravan unos", "details": err.Error()})
 		return
@@ -311,6 +348,10 @@ func (h *AuthHandler) RequestReset(c *gin.Context) {
 // ResetPassword: potvrda reset tokena i postavljanje nove lozinke.
 func (h *AuthHandler) ResetPassword(c *gin.Context) {
 	var req ResetConfirmRequest
+		if err := validation.ValidateHexToken(req.Token); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "neispravan unos", "details": err.Error()})
 		return
@@ -338,6 +379,10 @@ func (h *AuthHandler) ResetPassword(c *gin.Context) {
 // RequestMagicLink: generiše magic link (demo: vraća ga u odgovoru, inače bi se slao emailom).
 func (h *AuthHandler) RequestMagicLink(c *gin.Context) {
 	var req MagicLinkRequest
+		if err := validation.ValidateEmail(req.Email); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "neispravan unos", "details": err.Error()})
 		return
@@ -360,6 +405,10 @@ func (h *AuthHandler) RequestMagicLink(c *gin.Context) {
 // ConfirmMagicLink: potvrđuje magic link i vraća JWT token
 func (h *AuthHandler) ConfirmMagicLink(c *gin.Context) {
 	var req MagicLinkConfirm
+		if err := validation.ValidateHexToken(req.Token); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "neispravan unos", "details": err.Error()})
 		return
@@ -392,6 +441,36 @@ func (h *AuthHandler) ConfirmMagicLink(c *gin.Context) {
 		"role":      user.Role,
 		"username":  user.Username,
 		"expiresAt": time.Now().Add(time.Duration(24) * time.Hour).Unix(),
+	})
+}
+
+// VerifyFileUpload: 2.18 demo bezbednog upravljanja datotekama (whitelist + integritet)
+// Očekuje multipart/form-data sa field "file".
+// Opcionalno: expectedSha256 u form polju za proveru integriteta.
+func (h *AuthHandler) VerifyFileUpload(c *gin.Context) {
+	fileHeader, err := c.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "missing file"})
+		return
+	}
+	expected := strings.TrimSpace(strings.ToLower(c.PostForm("expectedSha256")))
+
+	mimeType, sha, err := validation.ValidateUploadedFile(fileHeader, validation.DefaultMaxUploadBytes)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if expected != "" && expected != sha {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "integrity check failed", "sha256": sha})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":  "file ok",
+		"filename": fileHeader.Filename,
+		"mime":     mimeType,
+		"size":     fileHeader.Size,
+		"sha256":   sha,
 	})
 }
 
