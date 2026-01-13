@@ -91,6 +91,7 @@ func (s *MongoUserStore) Register(u models.User) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	tokenHash := security.HashSHA256Hex(token)
 
 	doc := mongoUser{
 		Username:           u.Username,
@@ -109,14 +110,15 @@ func (s *MongoUserStore) Register(u models.User) (string, error) {
 	if _, err := s.col.InsertOne(ctx, doc); err != nil {
 		return "", err
 	}
-	s.verificationMap[token] = u.Username
+	s.verificationMap[tokenHash] = u.Username
 	return token, nil
 }
 
 func (s *MongoUserStore) Confirm(token string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	username, ok := s.verificationMap[token]
+	tokenHash := security.HashSHA256Hex(token)
+	username, ok := s.verificationMap[tokenHash]
 	if !ok {
 		return ErrTokenInvalid
 	}
@@ -133,7 +135,7 @@ func (s *MongoUserStore) Confirm(token string) error {
 	if res.ModifiedCount == 0 {
 		return ErrUserNotFound
 	}
-	delete(s.verificationMap, token)
+	delete(s.verificationMap, tokenHash)
 	return nil
 }
 
@@ -159,18 +161,20 @@ func (s *MongoUserStore) Authenticate(username, password string) (string, error)
 	if err != nil {
 		return "", err
 	}
-	s.otpMap[code] = otpEntry{Username: username, ExpiresAt: time.Now().Add(10 * time.Minute)}
+	codeHash := security.HashSHA256Hex(code)
+	s.otpMap[codeHash] = otpEntry{Username: username, ExpiresAt: time.Now().Add(10 * time.Minute)}
 	return code, nil
 }
 
 func (s *MongoUserStore) VerifyOTP(code string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	entry, ok := s.otpMap[code]
+	codeHash := security.HashSHA256Hex(code)
+	entry, ok := s.otpMap[codeHash]
 	if !ok || time.Now().After(entry.ExpiresAt) {
 		return "", ErrOTPInvalid
 	}
-	delete(s.otpMap, code)
+	delete(s.otpMap, codeHash)
 	session, err := security.GenerateToken()
 	if err != nil {
 		return "", err
@@ -230,7 +234,8 @@ func (s *MongoUserStore) RequestPasswordReset(email string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	s.resetMap[token] = resetEntry{
+	tokenHash := security.HashSHA256Hex(token)
+	s.resetMap[tokenHash] = resetEntry{
 		Username:  u.Username,
 		ExpiresAt: time.Now().Add(15 * time.Minute),
 	}
@@ -240,11 +245,12 @@ func (s *MongoUserStore) RequestPasswordReset(email string) (string, error) {
 func (s *MongoUserStore) ResetPassword(token, newPassword string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	entry, ok := s.resetMap[token]
+	tokenHash := security.HashSHA256Hex(token)
+	entry, ok := s.resetMap[tokenHash]
 	if !ok || time.Now().After(entry.ExpiresAt) {
 		return ErrResetInvalid
 	}
-	delete(s.resetMap, token)
+	delete(s.resetMap, tokenHash)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -284,7 +290,8 @@ func (s *MongoUserStore) RequestMagicLink(email string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	s.magicMap[token] = resetEntry{
+	tokenHash := security.HashSHA256Hex(token)
+	s.magicMap[tokenHash] = resetEntry{
 		Username:  u.Username,
 		ExpiresAt: time.Now().Add(15 * time.Minute),
 	}
@@ -295,11 +302,12 @@ func (s *MongoUserStore) ConsumeMagicLink(token string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	entry, ok := s.magicMap[token]
+	tokenHash := security.HashSHA256Hex(token)
+	entry, ok := s.magicMap[tokenHash]
 	if !ok || time.Now().After(entry.ExpiresAt) {
 		return "", ErrMagicInvalid
 	}
-	delete(s.magicMap, token)
+	delete(s.magicMap, tokenHash)
 
 	session, err := security.GenerateToken()
 	if err != nil {
@@ -317,11 +325,12 @@ func (s *MongoUserStore) VerifyOTPAndGetUser(code string) (*models.User, error) 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	entry, ok := s.otpMap[code]
+	codeHash := security.HashSHA256Hex(code)
+	entry, ok := s.otpMap[codeHash]
 	if !ok || time.Now().After(entry.ExpiresAt) {
 		return nil, ErrOTPInvalid
 	}
-	delete(s.otpMap, code)
+	delete(s.otpMap, codeHash)
 
 	var mu mongoUser
 	if err := s.col.FindOne(ctx, bson.M{"username": entry.Username}).Decode(&mu); err != nil {
@@ -334,7 +343,7 @@ func (s *MongoUserStore) VerifyOTPAndGetUser(code string) (*models.User, error) 
 		FirstName:         mu.FirstName,
 		LastName:          mu.LastName,
 		Email:             mu.Email,
-		Role:              "RK", // Default role from DB
+		Role:              mu.Role,
 		PasswordHash:      mu.PasswordHash,
 		Verified:          mu.Verified,
 		PasswordChangedAt: mu.PasswordChangedAt,
@@ -350,11 +359,12 @@ func (s *MongoUserStore) ConsumeMagicLinkAndGetUser(token string) (*models.User,
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	entry, ok := s.magicMap[token]
+	tokenHash := security.HashSHA256Hex(token)
+	entry, ok := s.magicMap[tokenHash]
 	if !ok || time.Now().After(entry.ExpiresAt) {
 		return nil, ErrMagicInvalid
 	}
-	delete(s.magicMap, token)
+	delete(s.magicMap, tokenHash)
 
 	var mu mongoUser
 	if err := s.col.FindOne(ctx, bson.M{"username": entry.Username}).Decode(&mu); err != nil {
@@ -367,7 +377,7 @@ func (s *MongoUserStore) ConsumeMagicLinkAndGetUser(token string) (*models.User,
 		FirstName:         mu.FirstName,
 		LastName:          mu.LastName,
 		Email:             mu.Email,
-		Role:              "RK", // Default role from DB
+		Role:              mu.Role,
 		PasswordHash:      mu.PasswordHash,
 		Verified:          mu.Verified,
 		PasswordChangedAt: mu.PasswordChangedAt,

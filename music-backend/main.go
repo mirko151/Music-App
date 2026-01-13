@@ -20,7 +20,13 @@ func main() {
 	r.Use(middleware.CORS())
 
 	// Konfiguracija iz environment varijabli
-	jwtSecret := envOr("JWT_SECRET", "your-secret-key-change-in-production")
+	jwtSecret := os.Getenv("JWT_SECRET")
+	if jwtSecret == "" {
+		log.Fatal("JWT_SECRET nije postavljen (obavezno za 2.19)")
+	}
+	if len(jwtSecret) < 32 {
+		log.Fatal("JWT_SECRET je prekratak; koristi najmanje 32 karaktera")
+	}
 	jwtExpiryHours := envOrInt("JWT_EXPIRY_HOURS", 24)
 
 	// Kreiranje token manager-a

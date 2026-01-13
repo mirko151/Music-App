@@ -88,6 +88,7 @@ func (s *MemoryUserStore) Register(u models.User) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	tokenHash := security.HashSHA256Hex(token)
 
 	u.Verified = false
 	u.RegistrationStatus = models.RegistrationPending
@@ -95,7 +96,7 @@ func (s *MemoryUserStore) Register(u models.User) (string, error) {
 	u.PasswordExpiresAt = time.Now().Add(models.PasswordMaxAge)
 
 	s.users[u.Username] = u
-	s.verificationMap[token] = u.Username
+	s.verificationMap[tokenHash] = u.Username
 	return token, nil
 }
 
@@ -103,7 +104,8 @@ func (s *MemoryUserStore) Confirm(token string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	username, ok := s.verificationMap[token]
+	tokenHash := security.HashSHA256Hex(token)
+	username, ok := s.verificationMap[tokenHash]
 	if !ok {
 		return ErrTokenInvalid
 	}
@@ -112,7 +114,7 @@ func (s *MemoryUserStore) Confirm(token string) error {
 	u.Verified = true
 	u.RegistrationStatus = models.RegistrationActive
 	s.users[username] = u
-	delete(s.verificationMap, token)
+	delete(s.verificationMap, tokenHash)
 	return nil
 }
 
@@ -138,7 +140,8 @@ func (s *MemoryUserStore) Authenticate(username, password string) (string, error
 	if err != nil {
 		return "", err
 	}
-	s.otpMap[code] = otpEntry{
+	codeHash := security.HashSHA256Hex(code)
+	s.otpMap[codeHash] = otpEntry{
 		Username:  username,
 		ExpiresAt: time.Now().Add(10 * time.Minute),
 	}
@@ -149,11 +152,12 @@ func (s *MemoryUserStore) VerifyOTP(code string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	entry, ok := s.otpMap[code]
+	codeHash := security.HashSHA256Hex(code)
+	entry, ok := s.otpMap[codeHash]
 	if !ok || time.Now().After(entry.ExpiresAt) {
 		return "", ErrOTPInvalid
 	}
-	delete(s.otpMap, code)
+	delete(s.otpMap, codeHash)
 
 	session, err := security.GenerateToken()
 	if err != nil {
@@ -213,7 +217,8 @@ func (s *MemoryUserStore) RequestPasswordReset(email string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	s.resetMap[token] = resetEntry{
+	tokenHash := security.HashSHA256Hex(token)
+	s.resetMap[tokenHash] = resetEntry{
 		Username:  username,
 		ExpiresAt: time.Now().Add(15 * time.Minute),
 	}
@@ -224,11 +229,12 @@ func (s *MemoryUserStore) ResetPassword(token, newPassword string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	entry, ok := s.resetMap[token]
+	tokenHash := security.HashSHA256Hex(token)
+	entry, ok := s.resetMap[tokenHash]
 	if !ok || time.Now().After(entry.ExpiresAt) {
 		return ErrResetInvalid
 	}
-	delete(s.resetMap, token)
+	delete(s.resetMap, tokenHash)
 
 	u := s.users[entry.Username]
 	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
@@ -260,7 +266,8 @@ func (s *MemoryUserStore) RequestMagicLink(email string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	s.magicMap[token] = resetEntry{
+	tokenHash := security.HashSHA256Hex(token)
+	s.magicMap[tokenHash] = resetEntry{
 		Username:  username,
 		ExpiresAt: time.Now().Add(15 * time.Minute),
 	}
@@ -271,11 +278,12 @@ func (s *MemoryUserStore) ConsumeMagicLink(token string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	entry, ok := s.magicMap[token]
+	tokenHash := security.HashSHA256Hex(token)
+	entry, ok := s.magicMap[tokenHash]
 	if !ok || time.Now().After(entry.ExpiresAt) {
 		return "", ErrMagicInvalid
 	}
-	delete(s.magicMap, token)
+	delete(s.magicMap, tokenHash)
 
 	session, err := security.GenerateToken()
 	if err != nil {
@@ -290,11 +298,12 @@ func (s *MemoryUserStore) VerifyOTPAndGetUser(code string) (*models.User, error)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	entry, ok := s.otpMap[code]
+	codeHash := security.HashSHA256Hex(code)
+	entry, ok := s.otpMap[codeHash]
 	if !ok || time.Now().After(entry.ExpiresAt) {
 		return nil, ErrOTPInvalid
 	}
-	delete(s.otpMap, code)
+	delete(s.otpMap, codeHash)
 
 	u, ok := s.users[entry.Username]
 	if !ok {
@@ -308,11 +317,12 @@ func (s *MemoryUserStore) ConsumeMagicLinkAndGetUser(token string) (*models.User
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	entry, ok := s.magicMap[token]
+	tokenHash := security.HashSHA256Hex(token)
+	entry, ok := s.magicMap[tokenHash]
 	if !ok || time.Now().After(entry.ExpiresAt) {
 		return nil, ErrMagicInvalid
 	}
-	delete(s.magicMap, token)
+	delete(s.magicMap, tokenHash)
 
 	u, ok := s.users[entry.Username]
 	if !ok {
