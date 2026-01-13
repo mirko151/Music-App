@@ -3,6 +3,29 @@ import './App.css'
 
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8080'
 
+const AUTH_STORAGE_KEY = 'music_auth'
+
+function loadAuth() {
+  try {
+    const raw = localStorage.getItem(AUTH_STORAGE_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    if (!parsed?.token) return null
+    return parsed
+  } catch {
+    return null
+  }
+}
+
+function saveAuth(auth) {
+  if (!auth?.token) return
+  localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(auth))
+}
+
+function clearAuth() {
+  localStorage.removeItem(AUTH_STORAGE_KEY)
+}
+
 const usernameRe = /^[a-zA-Z0-9._-]{3,50}$/
 const emailRe = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 const passwordRules = [
@@ -199,14 +222,16 @@ function RegistrationView({ goToLogin }) {
 function LoginView({ goToRegister, goToRecover }) {
   const [loginForm, setLoginForm] = useState({ username: '', password: '' })
   const [otp, setOtp] = useState('')
-  const [session, setSession] = useState('')
+  const [token, setToken] = useState('')
+  const [user, setUser] = useState(null)
   const [loginStatus, setLoginStatus] = useState('')
 
   const login = async (e) => {
     e.preventDefault()
     setLoginStatus('')
     setOtp('')
-    setSession('')
+    setToken('')
+    setUser(null)
     try {
       const res = await fetch(`${API_BASE}/login`, {
         method: 'POST',
@@ -235,27 +260,41 @@ function LoginView({ goToRegister, goToRecover }) {
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || 'OTP nevažeći')
-      setSession(data.session)
+
+      const nextAuth = {
+        token: data.token,
+        user_id: data.user_id,
+        email: data.email,
+        role: data.role,
+        username: data.username,
+        expiresAt: data.expiresAt,
+      }
+
+      setToken(nextAuth.token)
+      setUser(nextAuth)
+      saveAuth(nextAuth)
+
       setLoginStatus(data.message || 'Prijava uspešna')
+      window.location.hash = nextAuth.role === 'A' ? '#admin' : '#user'
     } catch (err) {
       setLoginStatus(err.message)
     }
   }
 
   const logout = async () => {
-    if (!session) {
-      setLoginStatus('Nema aktivne sesije')
-      return
-    }
     try {
       const res = await fetch(`${API_BASE}/logout`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session }),
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || 'Neuspešna odjava')
-      setSession('')
+      setToken('')
+      setUser(null)
+      clearAuth()
       setLoginStatus(data.message || 'Odjava uspešna')
     } catch (err) {
       setLoginStatus(err.message)
@@ -310,7 +349,12 @@ function LoginView({ goToRegister, goToRecover }) {
               OTP kod
               <input value={otp} onChange={(e) => setOtp(e.target.value)} placeholder="unesi 6-cifreni kod" />
             </label>
-            <div className="token-box">{session ? `Session: ${session}` : 'Nema sesije još'}</div>
+            <div className="token-box">{token ? `Token: ${token}` : 'Nema tokena još'}</div>
+            {user?.role && (
+              <p className="info" style={{ marginTop: 8 }}>
+                Uloga: <b>{user.role}</b>
+              </p>
+            )}
           </div>
           <div className="action-row">
             <button type="button" onClick={verifyOtp}>
@@ -327,7 +371,7 @@ function LoginView({ goToRegister, goToRecover }) {
   )
 }
 
-function RecoveryView({ goToLogin }) {
+function RecoveryView({ goToLogin, auth, onAuth }) {
   const [changeForm, setChangeForm] = useState({
     username: '',
     currentPassword: '',
@@ -342,7 +386,7 @@ function RecoveryView({ goToLogin }) {
   const [magicEmail, setMagicEmail] = useState('')
   const [magicToken, setMagicToken] = useState('')
   const [magicStatus, setMagicStatus] = useState('')
-  const [session, setSession] = useState('')
+  const [token, setToken] = useState('')
 
   const passwordStrongChange = useMemo(
     () => passwordRules.every((r) => r.test(changeForm.newPassword)),
@@ -367,7 +411,10 @@ function RecoveryView({ goToLogin }) {
     try {
       const res = await fetch(`${API_BASE}/password/change`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(auth?.token ? { Authorization: `Bearer ${auth.token}` } : {}),
+        },
         body: JSON.stringify({
           username: changeForm.username.trim(),
           currentPassword: changeForm.currentPassword,
@@ -462,8 +509,21 @@ function RecoveryView({ goToLogin }) {
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || 'Magic link nevažeći')
-      setSession(data.session || '')
+
+      const nextAuth = {
+        token: data.token,
+        user_id: data.user_id,
+        email: data.email,
+        role: data.role,
+        username: data.username,
+        expiresAt: data.expiresAt,
+      }
+
+      setToken(nextAuth.token || '')
+      saveAuth(nextAuth)
+      onAuth?.(nextAuth)
       setMagicStatus(data.message || 'Prijava preko magic linka uspešna')
+      window.location.hash = nextAuth.role === 'A' ? '#admin' : '#user'
     } catch (err) {
       setMagicStatus(err.message)
     }
@@ -617,7 +677,7 @@ function RecoveryView({ goToLogin }) {
             </div>
             <div className="action-row">
               <button type="submit">Potvrdi magic link</button>
-              {session && <span className="info">Session: {session}</span>}
+              {token && <span className="info">Token: {token}</span>}
             </div>
           </form>
           {magicStatus && <p className="info">{magicStatus}</p>}
@@ -627,9 +687,123 @@ function RecoveryView({ goToLogin }) {
   )
 }
 
+function UserHome({ auth, onLogout }) {
+  return (
+    <div className="page">
+      <header>
+        <p className="eyebrow">RK</p>
+        <h1>Početna (User)</h1>
+        <p className="lede">Ulogovan si kao regularni korisnik.</p>
+      </header>
+
+      <main className="grid">
+        <section className="card">
+          <h2>Profil</h2>
+          <div className="token-box">
+            <div>username: {auth?.username || '-'}</div>
+            <div>email: {auth?.email || '-'}</div>
+            <div>role: {auth?.role || '-'}</div>
+            <div>user_id: {auth?.user_id || '-'}</div>
+          </div>
+          <div className="action-row">
+            <button type="button" onClick={onLogout}>
+              Odjava
+            </button>
+            <button type="button" className="link-btn" onClick={() => (window.location.hash = '#recover')}>
+              Promena/Reset/Magic link
+            </button>
+          </div>
+        </section>
+      </main>
+    </div>
+  )
+}
+
+function AdminHome({ auth, onLogout }) {
+  const [targetUserId, setTargetUserId] = useState('')
+  const [targetRole, setTargetRole] = useState('RK')
+  const [status, setStatus] = useState('')
+
+  const updateRole = async () => {
+    setStatus('')
+    if (!targetUserId.trim()) {
+      setStatus('Unesi user_id')
+      return
+    }
+    try {
+      const res = await fetch(`${API_BASE}/admin/users/${encodeURIComponent(targetUserId.trim())}/role`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${auth?.token}`,
+        },
+        body: JSON.stringify({ role: targetRole }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || 'Neuspešno menjanje uloge')
+      setStatus('Uloga je ažurirana')
+    } catch (err) {
+      setStatus(err.message)
+    }
+  }
+
+  return (
+    <div className="page">
+      <header>
+        <p className="eyebrow">ADMIN</p>
+        <h1>Početna (Admin)</h1>
+        <p className="lede">Ulogovan si kao administrator.</p>
+      </header>
+
+      <main className="grid">
+        <section className="card">
+          <h2>Profil</h2>
+          <div className="token-box">
+            <div>username: {auth?.username || '-'}</div>
+            <div>email: {auth?.email || '-'}</div>
+            <div>role: {auth?.role || '-'}</div>
+            <div>user_id: {auth?.user_id || '-'}</div>
+          </div>
+          <div className="action-row">
+            <button type="button" onClick={onLogout}>
+              Odjava
+            </button>
+          </div>
+        </section>
+
+        <section className="card secondary">
+          <h2>Admin akcija (2.17 demo)</h2>
+          <div className="field">
+            <label>
+              user_id korisnika
+              <input value={targetUserId} onChange={(e) => setTargetUserId(e.target.value)} placeholder="npr. 507f1f77bcf86cd799439011" />
+            </label>
+          </div>
+          <div className="field">
+            <label>
+              Nova uloga
+              <select value={targetRole} onChange={(e) => setTargetRole(e.target.value)}>
+                <option value="RK">RK</option>
+                <option value="A">A</option>
+              </select>
+            </label>
+          </div>
+          <button type="button" onClick={updateRole}>
+            Promeni ulogu
+          </button>
+          {status && <p className="info">{status}</p>}
+        </section>
+      </main>
+    </div>
+  )
+}
+
 function App() {
+  const [auth, setAuth] = useState(() => loadAuth())
   const [view, setView] = useState(() => {
     const hash = window.location.hash
+    if (hash === '#admin') return 'admin'
+    if (hash === '#user') return 'user'
     if (hash === '#register') return 'register'
     if (hash === '#recover') return 'recover'
     return 'login'
@@ -638,13 +812,43 @@ function App() {
   useEffect(() => {
     const onHash = () => {
       const hash = window.location.hash
-      if (hash === '#register') setView('register')
+      if (hash === '#admin') setView('admin')
+      else if (hash === '#user') setView('user')
+      else if (hash === '#register') setView('register')
       else if (hash === '#recover') setView('recover')
       else setView('login')
     }
     window.addEventListener('hashchange', onHash)
     return () => window.removeEventListener('hashchange', onHash)
   }, [])
+
+  useEffect(() => {
+    if (!auth?.token) return
+    if (auth.role === 'A') {
+      window.location.hash = '#admin'
+      setView('admin')
+    } else {
+      window.location.hash = '#user'
+      setView('user')
+    }
+  }, [auth])
+
+  const logout = async () => {
+    try {
+      await fetch(`${API_BASE}/logout`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(auth?.token ? { Authorization: `Bearer ${auth.token}` } : {}),
+        },
+      })
+    } finally {
+      clearAuth()
+      setAuth(null)
+      window.location.hash = '#login'
+      setView('login')
+    }
+  }
 
   const goToRegister = () => {
     window.location.hash = '#register'
@@ -659,8 +863,10 @@ function App() {
     setView('recover')
   }
 
+  if (view === 'admin') return <AdminHome auth={auth} onLogout={logout} />
+  if (view === 'user') return <UserHome auth={auth} onLogout={logout} />
   if (view === 'register') return <RegistrationView goToLogin={goToLogin} />
-  if (view === 'recover') return <RecoveryView goToLogin={goToLogin} />
+  if (view === 'recover') return <RecoveryView goToLogin={goToLogin} auth={auth} onAuth={setAuth} />
   return <LoginView goToRegister={goToRegister} goToRecover={goToRecover} />
 }
 
